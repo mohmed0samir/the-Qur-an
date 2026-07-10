@@ -1,0 +1,6 @@
+{
+  "name": "القرآن الكريم",
+  "description": "تطبيق وموقع القرآن الكريم الشامل لقراءة واستماع المصحف المرتل والمجود بمختلف الروايات وأصوات كبار القراء، مع ميزات البحث المتقدم والمحفوظات.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
