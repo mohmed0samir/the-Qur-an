@@ -86,6 +86,12 @@ export default function App() {
   // Track page return source
   const readerOrigin = useRef<ActiveTab>("surahs");
 
+  // Tafseer States
+  const [selectedTafseerBook, setSelectedTafseerBook] = useState<number>(1);
+  const [tafseerText, setTafseerText] = useState<string>("");
+  const [isLoadingTafseer, setIsLoadingTafseer] = useState<boolean>(false);
+  const [showTafseerPanel, setShowTafseerPanel] = useState<boolean>(true);
+
   // Dark mode class sync
   useEffect(() => {
     if (darkMode) {
@@ -158,6 +164,35 @@ export default function App() {
       }
     }
   }, [currentAyahIndex, readerOpen]);
+
+  // Fetch Tafseer of the active Ayah
+  useEffect(() => {
+    if (!readerOpen || readerAyahs.length === 0 || !showTafseerPanel) return;
+
+    const activeAyah = readerAyahs[currentAyahIndex];
+    if (!activeAyah) return;
+
+    // Determine correct Surah and Ayah numbers for Tafseer query
+    const sNum = activeSurahNumber || (activeAyah.surah ? activeAyah.surah.number : 1);
+    const aNum = activeAyah.numberInSurah;
+
+    const fetchTafseer = async () => {
+      setIsLoadingTafseer(true);
+      setTafseerText("");
+      try {
+        const response = await fetch(`https://api.quran-tafseer.com/tafseer/${selectedTafseerBook}/${sNum}/${aNum}`);
+        if (!response.ok) throw new Error();
+        const data = await response.json();
+        setTafseerText(data.text || "لا يوجد تفسير متاح لهذه الآية حالياً.");
+      } catch (err) {
+        setTafseerText("تعذر تحميل التفسير حالياً، يرجى المحاولة مرة أخرى.");
+      } finally {
+        setIsLoadingTafseer(false);
+      }
+    };
+
+    fetchTafseer();
+  }, [currentAyahIndex, readerOpen, selectedTafseerBook, showTafseerPanel, readerAyahs, activeSurahNumber]);
 
   // Load Reader Content (Surah or Juz)
   const loadReader = async (
@@ -871,6 +906,74 @@ export default function App() {
                         </span>
                       );
                     })}
+                  </div>
+
+                  {/* Collapsible Tafseer Panel */}
+                  <div className="mt-8 border-t border-emerald-100 dark:border-emerald-900/60 pt-6">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
+                      <button
+                        type="button"
+                        onClick={() => setShowTafseerPanel(!showTafseerPanel)}
+                        className="flex items-center gap-2 text-emerald-800 dark:text-amber-400 font-bold hover:opacity-85 transition-all cursor-pointer text-right"
+                      >
+                        <BookOpen size={18} />
+                        <span className="font-sans text-sm">
+                          {showTafseerPanel ? "إخفاء تفسير الآية الكريمة" : "إظهار تفسير الآية الكريمة"}
+                        </span>
+                      </button>
+
+                      {showTafseerPanel && (
+                        <div className="flex items-center gap-2 self-start sm:self-auto">
+                          <span className="text-xs text-gray-500 dark:text-emerald-400 font-sans font-medium">كتاب التفسير:</span>
+                          <select
+                            value={selectedTafseerBook}
+                            onChange={(e) => setSelectedTafseerBook(parseInt(e.target.value))}
+                            className="text-xs bg-slate-50 dark:bg-emerald-900/40 text-emerald-900 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-800 rounded-xl px-3 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500 dark:focus:ring-amber-500 cursor-pointer shadow-sm font-sans font-bold"
+                          >
+                            <option value={1}>التفسير الميسر</option>
+                            <option value={3}>تفسير السعدي</option>
+                            <option value={2}>تفسير الجلالين</option>
+                            <option value={4}>تفسير ابن كثير</option>
+                            <option value={5}>تفسير القرطبي</option>
+                            <option value={7}>تفسير الطبري</option>
+                          </select>
+                        </div>
+                      )}
+                    </div>
+
+                    <AnimatePresence initial={false}>
+                      {showTafseerPanel && (
+                        <motion.div
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: "auto" }}
+                          exit={{ opacity: 0, height: 0 }}
+                          className="overflow-hidden"
+                        >
+                          <div className="bg-amber-50/40 dark:bg-emerald-900/10 border border-amber-100/50 dark:border-emerald-800/30 rounded-2xl p-5 relative mb-4">
+                            {/* Header indicating active ayah details */}
+                            <div className="flex items-center justify-between mb-3 border-b border-dashed border-amber-200/40 dark:border-emerald-800/20 pb-2 flex-row-reverse">
+                              <span className="text-xs font-sans text-amber-800 dark:text-amber-400 font-bold">
+                                تفسير الآية {currentAyahObj?.numberInSurah} من {currentAyahObj?.surah?.name || readerTitle}
+                              </span>
+                              <span className="text-[10px] font-sans text-gray-400 dark:text-emerald-500">
+                                المصدر: تفسير دوت كوم
+                              </span>
+                            </div>
+
+                            {isLoadingTafseer ? (
+                              <div className="flex items-center gap-2 justify-center py-6 text-xs text-emerald-700 dark:text-amber-400 font-sans">
+                                <RefreshCw size={14} className="animate-spin" />
+                                <span>جاري تحميل التفسير...</span>
+                              </div>
+                            ) : (
+                              <p className="font-sans text-sm md:text-base text-gray-700 dark:text-gray-200 leading-relaxed text-right font-medium">
+                                {tafseerText}
+                              </p>
+                            )}
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
 
                   {/* Floating Footer Audio Player Panel */}
