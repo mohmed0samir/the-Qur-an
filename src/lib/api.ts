@@ -57,7 +57,7 @@ export function describeError(e: unknown, what = "البيانات"): string {
       case "http":
         return `تعذّر تحميل ${what} (رمز الخادم ${e.status ?? "؟"}). أعد المحاولة لاحقاً.`;
       case "network":
-        return `تعذّر الوصول إلى الخادم لتحميل ${what}. تحقق من الاتصال.`;
+        return `تعذّر الوصول إلى الخادم لتحميل ${what}. تحقق من الاتصال، أو قد يمنع الخادم الطلب (CORS).`;
       default:
         return "";
     }

@@ -180,16 +180,14 @@ export function parseFullQuran(raw: unknown): QuranIndexSource {
   const surahs: Surah[] = [];
   const ayahs: QuranIndexSource["ayahs"] = [];
   data.surahs.forEach((rawSurah, i) => {
-    if (!isRecord(rawSurah)) throw new FormatError("سورة غير صالحة");
-    const meta = parseSurahMeta(rawSurah);
-    if (meta.number !== i + 1) throw new FormatError("ترتيب السور غير صحيح");
-    if (!Array.isArray(rawSurah.ayahs) || rawSurah.ayahs.length !== meta.numberOfAyahs) {
-      throw new FormatError("آيات سورة غير مكتملة");
+    if (!isRecord(rawSurah) || !Array.isArray(rawSurah.ayahs) || rawSurah.ayahs.length === 0) {
+      throw new FormatError("سورة غير صالحة");
     }
+    // This endpoint does not include `numberOfAyahs` per surah, so it is derived from the ayahs.
+    const meta = parseSurahMeta({ ...rawSurah, number: rawSurah.number, numberOfAyahs: rawSurah.ayahs.length });
+    if (meta.number !== i + 1) throw new FormatError("ترتيب السور غير صحيح");
     rawSurah.ayahs.forEach((a, idx) => {
-      if (!isRecord(a) || !isNonEmptyString(a.text) || a.numberInSurah !== idx + 1) {
-        throw new FormatError("آية غير صالحة");
-      }
+      if (!isRecord(a) || !isNonEmptyString(a.text)) throw new FormatError("آية غير صالحة");
       ayahs.push({ surahNumber: meta.number, ayahNumber: idx + 1, text: a.text });
     });
     surahs.push(meta);

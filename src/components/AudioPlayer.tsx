@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AlertCircle, Loader2, Pause, Play, RotateCcw, SkipBack, SkipForward, SlidersHorizontal } from "lucide-react";
+import { AlertCircle, Loader2, Pause, Play, Repeat, Repeat1, RotateCcw, SkipBack, SkipForward, SlidersHorizontal } from "lucide-react";
 import { RECITERS } from "../lib/reciters";
 import { STORAGE_KEYS, readBoolean, readNumber, writeString } from "../lib/storage";
 import { toArabicIndic } from "../lib/arabic";
@@ -46,8 +46,18 @@ export function AudioPlayer(props: AudioPlayerProps) {
     isPlaying, setIsPlaying, extraControls
   } = props;
 
-  const audioRef = useRef<HTMLAudioElement>(null);
+  // Two elements are used so the next ayah is already loaded when the current one ends
+  // (each ayah is a separate file; swapping avoids an audible gap).
+  const elA = useRef<HTMLAudioElement>(null);
+  const elB = useRef<HTMLAudioElement>(null);
+  const frontIdx = useRef(0);
+  const unlocked = useRef(false);
   const switching = useRef(false);
+  const front = () => (frontIdx.current === 0 ? elA.current : elB.current);
+  const back = () => (frontIdx.current === 0 ? elB.current : elA.current);
+  const guard = <E extends { currentTarget: HTMLAudioElement }>(fn: (e: E) => void) => (e: E) => {
+    if (e.currentTarget === front()) fn(e);
+  };
   const sourcesKey = sources.join("|");
   const [fallback, setFallback] = useState({ key: "", index: 0 });
   const [failedKey, setFailedKey] = useState("");
@@ -76,30 +86,43 @@ export function AudioPlayer(props: AudioPlayerProps) {
     setVolumeAdjustable(a.volume === 0.5);
   }, []);
 
-  // Apply the source.
+  // Apply the source: reuse the preloaded element when it already holds this ayah.
   useEffect(() => {
-    const el = audioRef.current;
-    if (!el) return;
+    const f = front();
+    const b = back();
+    if (!f || !b) return;
     if (!src) {
-      el.pause();
-      if (el.getAttribute("src")) {
-        el.removeAttribute("src");
-        el.load();
+      f.pause();
+      b.pause();
+      for (const el of [f, b]) {
+        if (el.getAttribute("src")) {
+          el.removeAttribute("src");
+          el.load();
+        }
       }
       setTime(0);
       setDuration(0);
       return;
     }
-    if (el.getAttribute("src") !== src) {
-      switching.current = true;
-      el.src = src;
-      el.load();
+    if (f.getAttribute("src") === src) return;
+    if (b.getAttribute("src") === src) {
+      f.pause();
+      frontIdx.current = frontIdx.current === 0 ? 1 : 0;
+      b.currentTime = 0;
+      switching.current = false;
+      setTime(0);
+      setDuration(Number.isFinite(b.duration) ? b.duration : 0);
+      setBuffering(b.readyState < 3);
+      return;
     }
+    switching.current = true;
+    f.src = src;
+    f.load();
   }, [src]);
 
   // Playback intent. AbortError (source changed mid-request) is expected and ignored.
   useEffect(() => {
-    const el = audioRef.current;
+    const el = front();
     if (!el || !src || failed) return;
     if (isPlaying) {
       const p = el.play();
@@ -116,27 +139,22 @@ export function AudioPlayer(props: AudioPlayerProps) {
   }, [isPlaying, src, failed, setIsPlaying]);
 
   useEffect(() => {
-    const el = audioRef.current;
-    if (!el) return;
-    el.defaultPlaybackRate = speed;
-    el.playbackRate = speed;
-    el.volume = volume;
-  }, [speed, volume, src]);
+    for (const el of [elA.current, elB.current]) {
+      if (!el) continue;
+      el.defaultPlaybackRate = speed;
+      el.playbackRate = speed;
+      el.volume = volume;
+    }
+  }, [speed, volume, src, nextSource]);
 
-  // Warm up the next ayah so auto-advance has no gap.
+  // Preload the next ayah into the idle element (independent of autoplay: manual "next" benefits too).
   useEffect(() => {
-    if (!autoNext || !nextSource) return;
-    let pre: HTMLAudioElement | null = null;
-    const t = window.setTimeout(() => {
-      pre = new Audio();
-      pre.preload = "auto";
-      pre.src = nextSource;
-    }, 500);
-    return () => {
-      window.clearTimeout(t);
-      if (pre) pre.src = "";
-    };
-  }, [nextSource, autoNext]);
+    const b = back();
+    if (!b || !nextSource || b.getAttribute("src") === nextSource) return;
+    b.preload = "auto";
+    b.src = nextSource;
+    b.load();
+  }, [nextSource, src]);
 
   // Lock-screen / headset controls.
   useEffect(() => {
@@ -191,48 +209,65 @@ export function AudioPlayer(props: AudioPlayerProps) {
       setFailedKey("");
       setFallback({ key: sourcesKey, index: 0 });
     }
+    // iOS only lets an element play after a user gesture; unlock the idle one once, silently.
+    const idle = back();
+    if (!unlocked.current && idle && !isPlaying) {
+      unlocked.current = true;
+      const prev = idle.getAttribute("src");
+      idle.muted = true;
+      const pr = idle.play();
+      if (pr) {
+        pr.then(() => idle.pause())
+          .catch(() => undefined)
+          .finally(() => {
+            idle.muted = false;
+            idle.currentTime = 0;
+            if (prev && idle.getAttribute("src") !== prev) {
+              idle.src = prev;
+              idle.load();
+            }
+          });
+      }
+    }
     setIsPlaying(!isPlaying);
   };
 
   return (
     <div className="player" ref={panelRef}>
-      <audio
-        ref={audioRef}
-        preload="auto"
-        playsInline
-        onLoadStart={() => {
+      <audio ref={elA} preload="auto" playsInline
+        onLoadStart={guard(() => {
           setTime(0);
           setBuffering(true);
-        }}
-        onLoadedMetadata={(e) => {
+        })}
+        onLoadedMetadata={guard((e) => {
           const d = e.currentTarget.duration;
           setDuration(Number.isFinite(d) ? d : 0);
-        }}
-        onDurationChange={(e) => {
+        })}
+        onDurationChange={guard((e) => {
           const d = e.currentTarget.duration;
           setDuration(Number.isFinite(d) ? d : 0);
-        }}
-        onCanPlay={() => {
+        })}
+        onCanPlay={guard(() => {
           switching.current = false;
           setBuffering(false);
-        }}
-        onWaiting={() => setBuffering(true)}
-        onPlaying={() => {
+        })}
+        onWaiting={guard(() => setBuffering(true))}
+        onPlaying={guard(() => {
           switching.current = false;
           setBuffering(false);
           if (!isPlaying) setIsPlaying(true);
-        }}
-        onPause={(e) => {
+        })}
+        onPause={guard((e) => {
           const el = e.currentTarget;
           if (!el.ended && !switching.current && !el.seeking) setIsPlaying(false);
-        }}
-        onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
-        onEnded={() => {
+        })}
+        onTimeUpdate={guard((e) => setTime(e.currentTarget.currentTime))}
+        onEnded={guard(() => {
           const { autoNext: auto, hasNext: next, onNext: go } = cb.current;
           if (auto && next) go();
           else setIsPlaying(false);
-        }}
-        onError={() => {
+        })}
+        onError={guard(() => {
           if (!src) return;
           if (index + 1 < sources.length) {
             setFallback({ key: sourcesKey, index: index + 1 });
@@ -241,7 +276,51 @@ export function AudioPlayer(props: AudioPlayerProps) {
             setBuffering(false);
             setIsPlaying(false);
           }
-        }}
+        })}
+      />
+      <audio ref={elB} preload="auto" playsInline
+        onLoadStart={guard(() => {
+          setTime(0);
+          setBuffering(true);
+        })}
+        onLoadedMetadata={guard((e) => {
+          const d = e.currentTarget.duration;
+          setDuration(Number.isFinite(d) ? d : 0);
+        })}
+        onDurationChange={guard((e) => {
+          const d = e.currentTarget.duration;
+          setDuration(Number.isFinite(d) ? d : 0);
+        })}
+        onCanPlay={guard(() => {
+          switching.current = false;
+          setBuffering(false);
+        })}
+        onWaiting={guard(() => setBuffering(true))}
+        onPlaying={guard(() => {
+          switching.current = false;
+          setBuffering(false);
+          if (!isPlaying) setIsPlaying(true);
+        })}
+        onPause={guard((e) => {
+          const el = e.currentTarget;
+          if (!el.ended && !switching.current && !el.seeking) setIsPlaying(false);
+        })}
+        onTimeUpdate={guard((e) => setTime(e.currentTarget.currentTime))}
+        onEnded={guard(() => {
+          const { autoNext: auto, hasNext: next, onNext: go } = cb.current;
+          if (auto && next) go();
+          else setIsPlaying(false);
+        })}
+        onError={guard(() => {
+          if (!src) return;
+          if (index + 1 < sources.length) {
+            setFallback({ key: sourcesKey, index: index + 1 });
+          } else {
+            setFailedKey(sourcesKey);
+            setBuffering(false);
+            setIsPlaying(false);
+          }
+        })}
       />
 
       <div className="player__seek">
@@ -258,7 +337,8 @@ export function AudioPlayer(props: AudioPlayerProps) {
           onChange={(e) => {
             const v = Number(e.target.value);
             setTime(v);
-            if (audioRef.current) audioRef.current.currentTime = v;
+            const f = front();
+            if (f) f.currentTime = v;
           }}
         />
         <span className="num">{fmt(duration)}</span>
@@ -306,6 +386,19 @@ export function AudioPlayer(props: AudioPlayerProps) {
 
         <div className="player__extra">
           {extraControls}
+          <button
+            type="button"
+            className="icon-btn"
+            aria-pressed={autoNext}
+            aria-label={autoNext ? "التشغيل متتابع، اضغط ليصبح آية واحدة" : "آية واحدة فقط، اضغط ليصبح متتابعاً"}
+            title={autoNext ? "متتابع" : "آية واحدة"}
+            onClick={() => {
+              setAutoNext(!autoNext);
+              writeString(STORAGE_KEYS.autoPlayNext, autoNext ? "0" : "1");
+            }}
+          >
+            {autoNext ? <Repeat size={20} aria-hidden="true" /> : <Repeat1 size={20} aria-hidden="true" />}
+          </button>
           <button
             type="button"
             className="icon-btn"

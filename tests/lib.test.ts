@@ -213,6 +213,20 @@ describe("payload validation", () => {
   it("validates the complete Quran payload size", () => {
     assert.throws(() => parseFullQuran(envelope({ surahs: [] })), FormatError);
   });
+
+  it("accepts the full-Quran payload where surahs have no numberOfAyahs", () => {
+    // 114 surahs totalling 6236 ayahs (real counts are not needed, only the total).
+    const surahs = Array.from({ length: 114 }, (_, i) => {
+      const n = i === 113 ? 6236 - 113 * 54 : 54;
+      return {
+        number: i + 1, name: `س${i + 1}`, englishName: "x", englishNameTranslation: "", revelationType: "Meccan",
+        ayahs: Array.from({ length: n }, (_, k) => ({ number: k + 1, text: "نص", numberInSurah: k + 1 }))
+      };
+    });
+    const parsed = parseFullQuran(envelope({ surahs }));
+    assert.equal(parsed.ayahs.length, 6236);
+    assert.equal(parsed.surahs[0].numberOfAyahs, 54);
+  });
 });
 
 /* ---------- fetchJson ---------- */
