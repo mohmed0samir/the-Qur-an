@@ -2,291 +2,386 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AlertCircle, Loader2, Pause, Play, RotateCcw, SkipBack, SkipForward, SlidersHorizontal } from "lucide-react";
+import { RECITERS } from "../lib/reciters";
+import { STORAGE_KEYS, readBoolean, readNumber, writeString } from "../lib/storage";
+import { toArabicIndic } from "../lib/arabic";
 
-import React, { useRef, useState, useEffect } from "react";
-import { Play, Pause, SkipForward, SkipBack, Volume2, Settings, RefreshCw } from "lucide-react";
-import { Reciter } from "../types";
+export { RECITERS };
 
-export const RECITERS: Reciter[] = [
-  { id: "ar.alafasy", name: "مشاري بن راشد العفاسي", englishName: "Mishary Alafasy" },
-  { id: "ar.abdurrahmaansudais", name: "عبد الرحمن السديس", englishName: "Abdurrahman Al-Sudais" },
-  { id: "ar.husary", name: "محمود خليل الحصري", englishName: "Mahmoud Al-Husary" },
-  { id: "ar.minshawi", name: "محمد صديق المنشاوي", englishName: "Muhammad Al-Minshawi" },
-  { id: "ar.ahmedajamy", name: "أحمد بن علي العجمي", englishName: "Ahmed Al-Ajamy" }
-];
+const SPEEDS = [0.75, 1, 1.25, 1.5];
 
-interface AudioPlayerProps {
-  audioUrl: string | undefined;
-  ayahText: string;
-  surahName: string;
-  ayahNumber: number;
-  onNext: () => void;
-  onPrevious: () => void;
-  hasNext: boolean;
-  hasPrevious: boolean;
-  currentReciter: string;
-  onReciterChange: (reciterId: string) => void;
-  isPlaying: boolean;
-  setIsPlaying: (playing: boolean) => void;
+function fmt(t: number): string {
+  if (!Number.isFinite(t) || t < 0) return "0:00";
+  const m = Math.floor(t / 60);
+  const s = Math.floor(t % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-export const AudioPlayer: React.FC<AudioPlayerProps> = ({
-  audioUrl,
-  ayahText,
-  surahName,
-  ayahNumber,
-  onNext,
-  onPrevious,
-  hasNext,
-  hasPrevious,
-  currentReciter,
-  onReciterChange,
-  isPlaying,
-  setIsPlaying
-}) => {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [progress, setProgress] = useState(0);
+interface AudioPlayerProps {
+  /** Candidate URLs (primary first) for the active ayah; empty while unavailable. */
+  sources: string[];
+  nextSource?: string;
+  audioStatus: "loading" | "ready" | "error";
+  audioMessage?: string;
+  onRetryAudio: () => void;
+  title: string;
+  subtitle: string;
+  hasNext: boolean;
+  hasPrevious: boolean;
+  onNext: () => void;
+  onPrevious: () => void;
+  reciterId: string;
+  onReciterChange: (id: string) => void;
+  isPlaying: boolean;
+  setIsPlaying: (v: boolean) => void;
+  extraControls?: ReactNode;
+}
+
+export function AudioPlayer(props: AudioPlayerProps) {
+  const {
+    sources, nextSource, audioStatus, audioMessage, onRetryAudio, title, subtitle,
+    hasNext, hasPrevious, onNext, onPrevious, reciterId, onReciterChange,
+    isPlaying, setIsPlaying, extraControls
+  } = props;
+
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const switching = useRef(false);
+  const sourcesKey = sources.join("|");
+  const [fallback, setFallback] = useState({ key: "", index: 0 });
+  const [failedKey, setFailedKey] = useState("");
+  const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [volume, setVolume] = useState(0.8);
-  const [speed, setSpeed] = useState(1);
-  const [autoPlayNext, setAutoPlayNext] = useState(true);
-  const [showSettings, setShowSettings] = useState(false);
+  const [buffering, setBuffering] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [autoNext, setAutoNext] = useState(() => readBoolean(STORAGE_KEYS.autoPlayNext, true));
+  const [speed, setSpeed] = useState(() => readNumber(STORAGE_KEYS.speed, 1, 0.5, 2));
+  const [volume, setVolume] = useState(() => readNumber(STORAGE_KEYS.volume, 1, 0, 1));
+  const [volumeAdjustable, setVolumeAdjustable] = useState(true);
+  const panelRef = useRef<HTMLDivElement>(null);
 
-  // Sync isPlaying with native audio element
+  const index = fallback.key === sourcesKey ? fallback.index : 0;
+  const src = sources[index];
+  const failed = failedKey === sourcesKey && sourcesKey !== "";
+
+  // Latest callbacks for use inside media events (avoids stale closures).
+  const cb = useRef({ onNext, autoNext, hasNext });
+  cb.current = { onNext, autoNext, hasNext };
+
+  // iOS Safari ignores programmatic volume; hide the slider there.
   useEffect(() => {
-    if (!audioRef.current) return;
+    const a = new Audio();
+    a.volume = 0.5;
+    setVolumeAdjustable(a.volume === 0.5);
+  }, []);
 
+  // Apply the source.
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (!src) {
+      el.pause();
+      if (el.getAttribute("src")) {
+        el.removeAttribute("src");
+        el.load();
+      }
+      setTime(0);
+      setDuration(0);
+      return;
+    }
+    if (el.getAttribute("src") !== src) {
+      switching.current = true;
+      el.src = src;
+      el.load();
+    }
+  }, [src]);
+
+  // Playback intent. AbortError (source changed mid-request) is expected and ignored.
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || !src || failed) return;
     if (isPlaying) {
-      audioRef.current.play().catch(() => {
-        setIsPlaying(false);
-      });
+      const p = el.play();
+      if (p) {
+        p.catch((err: unknown) => {
+          const name = err instanceof DOMException ? err.name : "";
+          if (name === "AbortError") return;
+          setIsPlaying(false);
+        });
+      }
     } else {
-      audioRef.current.pause();
+      el.pause();
     }
-  }, [isPlaying, audioUrl]);
+  }, [isPlaying, src, failed, setIsPlaying]);
 
-  // Sync speed and volume
   useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.playbackRate = speed;
-      audioRef.current.volume = volume;
-    }
-  }, [speed, volume, audioUrl]);
+    const el = audioRef.current;
+    if (!el) return;
+    el.defaultPlaybackRate = speed;
+    el.playbackRate = speed;
+    el.volume = volume;
+  }, [speed, volume, src]);
 
-  const togglePlay = () => {
+  // Warm up the next ayah so auto-advance has no gap.
+  useEffect(() => {
+    if (!autoNext || !nextSource) return;
+    let pre: HTMLAudioElement | null = null;
+    const t = window.setTimeout(() => {
+      pre = new Audio();
+      pre.preload = "auto";
+      pre.src = nextSource;
+    }, 500);
+    return () => {
+      window.clearTimeout(t);
+      if (pre) pre.src = "";
+    };
+  }, [nextSource, autoNext]);
+
+  // Lock-screen / headset controls.
+  useEffect(() => {
+    if (!("mediaSession" in navigator) || typeof MediaMetadata === "undefined") return;
+    navigator.mediaSession.metadata = new MediaMetadata({ title, artist: subtitle, album: "القرآن الكريم" });
+    const set = (a: MediaSessionAction, h: (() => void) | null) => {
+      try {
+        navigator.mediaSession.setActionHandler(a, h);
+      } catch {
+        /* unsupported action */
+      }
+    };
+    set("play", () => setIsPlaying(true));
+    set("pause", () => setIsPlaying(false));
+    set("nexttrack", hasNext ? onNext : null);
+    set("previoustrack", hasPrevious ? onPrevious : null);
+    return () => {
+      (["play", "pause", "nexttrack", "previoustrack"] as MediaSessionAction[]).forEach((a) => set(a, null));
+    };
+  }, [title, subtitle, hasNext, hasPrevious, onNext, onPrevious, setIsPlaying]);
+
+  // Close the settings panel on outside click / Escape.
+  useEffect(() => {
+    if (!open) return;
+    const down = (e: MouseEvent | TouchEvent) => {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const key = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", down);
+    document.addEventListener("touchstart", down);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("mousedown", down);
+      document.removeEventListener("touchstart", down);
+      document.removeEventListener("keydown", key);
+    };
+  }, [open]);
+
+  const unavailable = !src || failed;
+  const loading = audioStatus === "loading" || (!!src && buffering && isPlaying);
+  const statusText = useMemo(() => {
+    if (audioStatus === "error") return audioMessage || "تعذّر تحميل التلاوة";
+    if (failed) return "تعذّر تشغيل هذا المقطع";
+    if (audioStatus === "loading") return "جارٍ تحميل التلاوة…";
+    if (loading) return "جارٍ التحميل…";
+    return subtitle;
+  }, [audioStatus, audioMessage, failed, loading, subtitle]);
+  const isError = audioStatus === "error" || failed;
+
+  const toggle = () => {
+    if (failed) {
+      setFailedKey("");
+      setFallback({ key: sourcesKey, index: 0 });
+    }
     setIsPlaying(!isPlaying);
   };
 
-  const handleTimeUpdate = () => {
-    if (!audioRef.current) return;
-    setCurrentTime(audioRef.current.currentTime);
-    if (audioRef.current.duration) {
-      setProgress((audioRef.current.currentTime / audioRef.current.duration) * 100);
-    }
-  };
-
-  const handleLoadedMetadata = () => {
-    if (!audioRef.current) return;
-    setDuration(audioRef.current.duration || 0);
-  };
-
-  const handleEnded = () => {
-    setIsPlaying(false);
-    setProgress(0);
-    setCurrentTime(0);
-    if (autoPlayNext && hasNext) {
-      // Delay slightly before playing next
-      setTimeout(() => {
-        onNext();
-        // Give time for state update to load new audio, then play
-        setTimeout(() => {
-          setIsPlaying(true);
-        }, 150);
-      }, 600);
-    }
-  };
-
-  const handleProgressChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!audioRef.current || !duration) return;
-    const newPercentage = parseFloat(e.target.value);
-    const newTime = (newPercentage / 100) * duration;
-    audioRef.current.currentTime = newTime;
-    setCurrentTime(newTime);
-    setProgress(newPercentage);
-  };
-
-  const formatTime = (time: number) => {
-    if (isNaN(time)) return "00:00";
-    const mins = Math.floor(time / 60);
-    const secs = Math.floor(time % 60);
-    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-  };
-
   return (
-    <div className="bg-emerald-50 dark:bg-emerald-900/40 border border-emerald-100 dark:border-emerald-800/40 rounded-3xl p-5 shadow-sm mt-6 relative overflow-hidden">
-      {/* Hidden native audio element */}
-      {audioUrl && (
-        <audio
-          ref={audioRef}
-          src={audioUrl}
-          onTimeUpdate={handleTimeUpdate}
-          onLoadedMetadata={handleLoadedMetadata}
-          onEnded={handleEnded}
-        />
-      )}
+    <div className="player" ref={panelRef}>
+      <audio
+        ref={audioRef}
+        preload="auto"
+        playsInline
+        onLoadStart={() => {
+          setTime(0);
+          setBuffering(true);
+        }}
+        onLoadedMetadata={(e) => {
+          const d = e.currentTarget.duration;
+          setDuration(Number.isFinite(d) ? d : 0);
+        }}
+        onDurationChange={(e) => {
+          const d = e.currentTarget.duration;
+          setDuration(Number.isFinite(d) ? d : 0);
+        }}
+        onCanPlay={() => {
+          switching.current = false;
+          setBuffering(false);
+        }}
+        onWaiting={() => setBuffering(true)}
+        onPlaying={() => {
+          switching.current = false;
+          setBuffering(false);
+          if (!isPlaying) setIsPlaying(true);
+        }}
+        onPause={(e) => {
+          const el = e.currentTarget;
+          if (!el.ended && !switching.current && !el.seeking) setIsPlaying(false);
+        }}
+        onTimeUpdate={(e) => setTime(e.currentTarget.currentTime)}
+        onEnded={() => {
+          const { autoNext: auto, hasNext: next, onNext: go } = cb.current;
+          if (auto && next) go();
+          else setIsPlaying(false);
+        }}
+        onError={() => {
+          if (!src) return;
+          if (index + 1 < sources.length) {
+            setFallback({ key: sourcesKey, index: index + 1 });
+          } else {
+            setFailedKey(sourcesKey);
+            setBuffering(false);
+            setIsPlaying(false);
+          }
+        }}
+      />
 
-      {/* Header / Info bar */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-emerald-100/60 dark:border-emerald-800/20 pb-4 mb-4">
-        <div className="text-right">
-          <div className="flex items-center gap-2 justify-start md:justify-end flex-row-reverse">
-            <span className="text-xs font-bold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 border border-amber-200/50 dark:border-amber-900/40 px-2 py-0.5 rounded-md">
-              الآية {ayahNumber}
-            </span>
-            <h4 className="font-scheherazade text-xl font-bold text-emerald-900 dark:text-amber-100">
-              {surahName}
-            </h4>
-          </div>
-          <p className="text-sm text-gray-500 dark:text-emerald-300/70 line-clamp-1 mt-1 font-scheherazade">
-            {ayahText || "اختر آية للبدء في الاستماع"}
-          </p>
-        </div>
-
-        {/* Reciter Selector */}
-        <div className="flex items-center gap-2">
-          <label className="text-xs text-gray-400 dark:text-emerald-400 font-sans">القارئ:</label>
-          <select
-            value={currentReciter}
-            onChange={(e) => onReciterChange(e.target.value)}
-            className="text-xs bg-white dark:bg-emerald-950 text-emerald-900 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-800 rounded-xl px-3 py-2 outline-none focus:ring-1 focus:ring-emerald-500 dark:focus:ring-amber-500 cursor-pointer shadow-sm font-sans"
-          >
-            {RECITERS.map((reciter) => (
-              <option key={reciter.id} value={reciter.id}>
-                {reciter.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      {/* Progress slider */}
-      <div className="flex items-center gap-3 mb-4">
-        <span className="text-xs font-mono text-gray-400 dark:text-emerald-400/60">
-          {formatTime(currentTime)}
-        </span>
+      <div className="player__seek">
+        <span className="num">{fmt(time)}</span>
         <input
           type="range"
-          min="0"
-          max="100"
-          value={progress}
-          onChange={handleProgressChange}
-          className="flex-1 h-1 bg-emerald-200 dark:bg-emerald-800/40 rounded-lg appearance-none cursor-pointer accent-emerald-600 dark:accent-amber-400"
+          className="range"
+          min={0}
+          max={duration || 0}
+          step={0.1}
+          value={Math.min(time, duration || 0)}
+          disabled={unavailable || !duration}
+          aria-label="موضع التشغيل"
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            setTime(v);
+            if (audioRef.current) audioRef.current.currentTime = v;
+          }}
         />
-        <span className="text-xs font-mono text-gray-400 dark:text-emerald-400/60">
-          {formatTime(duration)}
-        </span>
+        <span className="num">{fmt(duration)}</span>
       </div>
 
-      {/* Controls panel */}
-      <div className="flex items-center justify-between">
-        {/* Left features (Speed, Autoplay) */}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setShowSettings(!showSettings)}
-            className={`p-2 rounded-xl transition-all border ${
-              showSettings
-                ? "bg-emerald-100 dark:bg-emerald-800 border-emerald-300"
-                : "hover:bg-emerald-100/50 dark:hover:bg-emerald-800/30 border-transparent text-emerald-700 dark:text-emerald-300"
-            }`}
-            title="الإعدادات"
-          >
-            <Settings size={18} />
-          </button>
+      <div className="player__row">
+        <div className="player__meta">
+          <strong>{title}</strong>
+          <span className={isError ? "player__status--error" : loading ? "player__status" : undefined} role="status">
+            {statusText}
+          </span>
+        </div>
 
-          <button
-            onClick={() => setAutoPlayNext(!autoPlayNext)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs transition-all border ${
-              autoPlayNext
-                ? "bg-emerald-100 dark:bg-emerald-800/40 border-emerald-200 text-emerald-800 dark:text-amber-400"
-                : "hover:bg-emerald-100/50 dark:hover:bg-emerald-800/30 border-transparent text-gray-400 dark:text-emerald-400/60"
-            }`}
-            title="التشغيل التلقائي للآية التالية"
-          >
-            <RefreshCw size={14} className={autoPlayNext ? "animate-spin-slow" : ""} />
-            <span className="font-sans hidden sm:inline">تلقائي</span>
+        <div className="player__transport">
+          {/* RTL: "previous" sits on the right and points right, "next" on the left and points left. */}
+          <button type="button" className="icon-btn" onClick={onPrevious} disabled={!hasPrevious} aria-label="الآية السابقة">
+            <SkipForward size={22} aria-hidden="true" />
+          </button>
+          {isError ? (
+            <button type="button" className="player__play" onClick={() => { onRetryAudio(); toggle(); }} aria-label="إعادة محاولة التلاوة">
+              {audioStatus === "error" ? <AlertCircle size={24} aria-hidden="true" /> : <RotateCcw size={24} aria-hidden="true" />}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="player__play"
+              onClick={toggle}
+              disabled={!src && audioStatus !== "loading"}
+              aria-label={isPlaying ? "إيقاف مؤقت" : "تشغيل"}
+              aria-pressed={isPlaying}
+            >
+              {loading && isPlaying ? (
+                <Loader2 className="spin" size={24} aria-hidden="true" />
+              ) : isPlaying ? (
+                <Pause size={24} aria-hidden="true" />
+              ) : (
+                <Play size={24} aria-hidden="true" />
+              )}
+            </button>
+          )}
+          <button type="button" className="icon-btn" onClick={onNext} disabled={!hasNext} aria-label="الآية التالية">
+            <SkipBack size={22} aria-hidden="true" />
           </button>
         </div>
 
-        {/* Center player controls */}
-        <div className="flex items-center gap-4">
+        <div className="player__extra">
+          {extraControls}
           <button
-            onClick={onPrevious}
-            disabled={!hasPrevious}
-            className="w-10 h-10 rounded-full flex items-center justify-center transition-all disabled:opacity-40 hover:bg-emerald-100/60 dark:hover:bg-emerald-800/40 text-emerald-800 dark:text-emerald-200"
-            title="الآية السابقة"
+            type="button"
+            className="icon-btn"
+            aria-expanded={open}
+            aria-haspopup="dialog"
+            aria-label="إعدادات التلاوة"
+            onClick={() => setOpen((v) => !v)}
           >
-            <SkipBack size={20} />
+            <SlidersHorizontal size={20} aria-hidden="true" />
           </button>
-
-          <button
-            onClick={togglePlay}
-            disabled={!audioUrl}
-            className="w-14 h-14 rounded-full bg-emerald-600 dark:bg-amber-500 text-white dark:text-emerald-950 flex items-center justify-center shadow-md hover:shadow-lg hover:scale-105 active:scale-95 transition-all disabled:opacity-50"
-            title={isPlaying ? "إيقاف مؤقت" : "تشغيل"}
-          >
-            {isPlaying ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" className="mr-0.5" />}
-          </button>
-
-          <button
-            onClick={onNext}
-            disabled={!hasNext}
-            className="w-10 h-10 rounded-full flex items-center justify-center transition-all disabled:opacity-40 hover:bg-emerald-100/60 dark:hover:bg-emerald-800/40 text-emerald-800 dark:text-emerald-200"
-            title="الآية التالية"
-          >
-            <SkipForward size={20} />
-          </button>
-        </div>
-
-        {/* Right volume controls */}
-        <div className="flex items-center gap-2">
-          <Volume2 size={16} className="text-emerald-700 dark:text-emerald-300" />
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.1"
-            value={volume}
-            onChange={(e) => setVolume(parseFloat(e.target.value))}
-            className="w-16 h-1 bg-emerald-200 dark:bg-emerald-800/40 rounded-lg appearance-none cursor-pointer accent-emerald-600 dark:accent-amber-400"
-            title="مستوى الصوت"
-          />
         </div>
       </div>
 
-      {/* Expanded settings drawer */}
-      {showSettings && (
-        <div className="mt-4 pt-4 border-t border-emerald-100 dark:border-emerald-800/30 flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex items-center gap-2">
-            <span className="text-gray-400 dark:text-emerald-400">سرعة القراءة:</span>
-            {[0.75, 1, 1.25, 1.5, 2].map((s) => (
-              <button
-                key={s}
-                onClick={() => setSpeed(s)}
-                className={`px-2.5 py-1 rounded-lg font-mono font-bold transition-all border ${
-                  speed === s
-                    ? "bg-emerald-600 dark:bg-amber-500 text-white dark:text-emerald-950 border-emerald-600 dark:border-amber-500"
-                    : "bg-white dark:bg-emerald-950 hover:bg-emerald-50 dark:hover:bg-emerald-900 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200"
-                }`}
-              >
-                {s}x
-              </button>
-            ))}
+      {open && (
+        <div className="popover popover--dock" role="dialog" aria-label="إعدادات التلاوة">
+          <div className="field">
+            <label className="field__label" htmlFor="reciter-select">القارئ</label>
+            <select id="reciter-select" className="select" value={reciterId} onChange={(e) => onReciterChange(e.target.value)}>
+              {RECITERS.map((r) => (
+                <option key={r.id} value={r.id}>{r.name}</option>
+              ))}
+            </select>
           </div>
-          <div className="text-[10px] text-gray-400 dark:text-emerald-500">
-            * اضغط على الكلمات لتشغيل الآية المقابلة فورياً.
+          <div className="field">
+            <span className="field__label">سرعة التشغيل</span>
+            <div className="seg" role="group" aria-label="سرعة التشغيل">
+              {SPEEDS.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  className="seg__btn"
+                  aria-pressed={speed === s}
+                  onClick={() => {
+                    setSpeed(s);
+                    writeString(STORAGE_KEYS.speed, String(s));
+                  }}
+                >
+                  <span className="num">{toArabicIndic(s).replace(".", "٫")}×</span>
+                </button>
+              ))}
+            </div>
           </div>
+          {volumeAdjustable && (
+            <div className="field">
+              <label className="field__label" htmlFor="volume-range">مستوى الصوت</label>
+              <input
+                id="volume-range"
+                type="range"
+                className="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={volume}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setVolume(v);
+                  writeString(STORAGE_KEYS.volume, String(v));
+                }}
+              />
+            </div>
+          )}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoNext}
+            className="switch"
+            onClick={() => {
+              setAutoNext(!autoNext);
+              writeString(STORAGE_KEYS.autoPlayNext, autoNext ? "0" : "1");
+            }}
+          >
+            <span>تشغيل الآية التالية تلقائياً</span>
+            <span className="switch__track" aria-hidden="true" />
+          </button>
         </div>
       )}
     </div>
   );
-};
+}

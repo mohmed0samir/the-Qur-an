@@ -2,12 +2,34 @@
 <html lang="ar" dir="rtl">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="description" content="مصحف إلكتروني فاخر بالرسم العثماني مع التلاوة والتفسير والبحث والمحفوظات." />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#F4EFE3" />
     <title>القرآن الكريم | المصحف الإلكتروني الشامل والتلاوات</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Amiri:wght@400;700&family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap"
+    />
+    <script>
+      // Apply the saved theme before first paint (no flash). Storage may be unavailable.
+      (function () {
+        try {
+          var t = localStorage.getItem("quran_theme");
+          var dark = t ? t === "night" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+          if (dark) {
+            document.documentElement.classList.add("dark");
+            var m = document.querySelector('meta[name="theme-color"]');
+            if (m) m.setAttribute("content", "#0C1915");
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-
